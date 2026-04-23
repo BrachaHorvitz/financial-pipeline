@@ -14,6 +14,18 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 public class Transaction {
 
+    public enum SourceSystem {
+        TAX_AUTHORITY, BANK_API, PAYMENT_GATEWAY
+    }
+
+    public enum TransactionType {
+        PAYMENT, REFUND, TRANSFER
+    }
+
+    public enum TransactionStatus {
+        PENDING, PROCESSED, FAILED, DUPLICATE
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
@@ -21,11 +33,18 @@ public class Transaction {
     @Column(nullable = false, unique = true)
     private String deduplicationKey;
 
-    private String sourceSystem;      // TAX_AUTHORITY, BANK_API, PAYMENT_GATEWAY
-    private String transactionType;   // PAYMENT, REFUND, TRANSFER
+    @Enumerated(EnumType.STRING)
+    private SourceSystem sourceSystem;
+
+    @Enumerated(EnumType.STRING)
+    private TransactionType transactionType;
+
     private BigDecimal amount;
     private String currency;
-    private String status;            // PENDING, PROCESSED, FAILED, DUPLICATE
+
+    @Enumerated(EnumType.STRING)
+    private TransactionStatus status;
+
     private String rawPayload;
 
     @CreationTimestamp

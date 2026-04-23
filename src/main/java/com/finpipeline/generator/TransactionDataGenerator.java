@@ -21,8 +21,8 @@ public class TransactionDataGenerator {
     private final TransactionRepository repository;
     private final Random random = new Random();
 
-    private static final String[] TYPES   = {"PAYMENT", "REFUND", "TRANSFER"};
-    private static final String[] SYSTEMS = {"TAX_AUTHORITY", "BANK_API", "PAYMENT_GATEWAY"};
+    private static final Transaction.SourceSystem[] SYSTEMS = Transaction.SourceSystem.values();
+    private static final Transaction.TransactionType[] TYPES = Transaction.TransactionType.values();
     private static final String[] CURRENCIES = {"ILS", "USD", "EUR"};
 
     public Transaction generateAndPublish() {
@@ -33,7 +33,7 @@ public class TransactionDataGenerator {
                 .amount(BigDecimal.valueOf(random.nextDouble() * 10000)
                         .setScale(2, RoundingMode.HALF_UP))
                 .currency(CURRENCIES[random.nextInt(CURRENCIES.length)])
-                .status("PENDING")
+                .status(Transaction.TransactionStatus.PENDING)
                 .retryCount(0)
                 .rawPayload("{\"generated\":true,\"source\":\"mock-generator\"}")
                 .build();

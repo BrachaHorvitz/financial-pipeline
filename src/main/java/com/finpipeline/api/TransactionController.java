@@ -32,11 +32,11 @@ public class TransactionController {
         return Mono.fromCallable(() -> {
             Transaction tx = Transaction.builder()
                     .deduplicationKey(request.deduplicationKey())
-                    .sourceSystem(request.sourceSystem())
-                    .transactionType(request.transactionType())
+                    .sourceSystem(Transaction.SourceSystem.valueOf(request.sourceSystem()))
+                    .transactionType(Transaction.TransactionType.valueOf(request.transactionType()))
                     .amount(request.amount())
                     .currency(request.currency())
-                    .status("PENDING")
+                    .status(Transaction.TransactionStatus.PENDING)
                     .rawPayload(request.rawPayload())
                     .retryCount(0)
                     .build();
@@ -53,11 +53,11 @@ public class TransactionController {
                 .flatMap(req -> Mono.fromCallable(() -> {
                     Transaction tx = Transaction.builder()
                             .deduplicationKey(req.deduplicationKey())
-                            .sourceSystem(req.sourceSystem())
-                            .transactionType(req.transactionType())
+                            .sourceSystem(Transaction.SourceSystem.valueOf(req.sourceSystem()))
+                            .transactionType(Transaction.TransactionType.valueOf(req.transactionType()))
                             .amount(req.amount())
                             .currency(req.currency())
-                            .status("PENDING")
+                            .status(Transaction.TransactionStatus.PENDING)
                             .retryCount(0)
                             .build();
 
