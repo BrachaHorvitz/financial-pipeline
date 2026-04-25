@@ -26,3 +26,7 @@ management:
     web:
       exposure:
         include: health,info,metrics
+
+app:
+  processing:
+    max-retries: 3
