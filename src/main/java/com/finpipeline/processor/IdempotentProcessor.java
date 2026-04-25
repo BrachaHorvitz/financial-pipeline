@@ -8,16 +8,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+
 /**
  * Idempotent processing gate — the last checkpoint before a transaction is persisted.
  *
- * Responsibilities:
- *   1. Deduplication — reject transactions whose deduplicationKey already exists in DB
- *   2. Retry tracking — increment retryCount on failure, mark FAILED when max is exceeded
- *   3. DLQ routing signal — returns ProcessingResult so the caller decides on DLQ
- *
- * This class is intentionally free of RabbitMQ imports — it returns a result,
- * it does not send to queues itself. That keeps it unit-testable without a broker.
+ * IMPORTANT: Transactions arrive deserialized from RabbitMQ JSON — they are DETACHED
+ * from any JPA session. All save operations must reload the managed entity from DB first
+ * to avoid StaleObjectStateException from Hibernate's optimistic locking.
  */
 @Service
 public class IdempotentProcessor {
@@ -33,61 +31,76 @@ public class IdempotentProcessor {
         this.repository = repository;
     }
 
-    /**
-     * Main entry point. Call this after RuleEngine + ETLTransformer have run.
-     *
-     * @return ProcessingResult — tells the caller whether to persist, skip, or DLQ
-     */
-    public ProcessingResult process(Transaction transaction) {
-        log.debug("IdempotentProcessor — checking transaction id={}, deduplicationKey={}",
-                transaction.getId(), transaction.getDeduplicationKey());
+    public ProcessingResult process(Transaction incoming) {
+        log.debug("IdempotentProcessor — checking id={}, deduplicationKey={}",
+                incoming.getId(), incoming.getDeduplicationKey());
+
+        // Reload managed entity — incoming is detached (deserialized from RabbitMQ JSON)
+        Transaction managed = repository.findById(incoming.getId()).orElse(null);
+
+        if (managed == null) {
+            log.warn("Transaction not found in DB — id={}, treating as new insert",
+                    incoming.getId());
+            // Fallback: save the incoming directly as a new record
+            incoming.setStatus(TransactionStatus.PROCESSED);
+            incoming.setProcessedAt(LocalDateTime.now());
+            repository.save(incoming);
+            return ProcessingResult.success(incoming);
+        }
+
+        // Apply ETL-enriched fields from the incoming (detached) object onto managed
+        managed.setAmount(incoming.getAmount());
+        managed.setCurrency(incoming.getCurrency());
+        managed.setProcessedAt(incoming.getProcessedAt());
 
         // --- Stage 1: Deduplication check ---
-        if (isDuplicate(transaction)) {
-            transaction.setStatus(TransactionStatus.DUPLICATE);
-            repository.save(transaction);
+        if (isDuplicate(managed)) {
+            managed.setStatus(TransactionStatus.DUPLICATE);
+            repository.save(managed);
             log.info("DUPLICATE detected — deduplicationKey={}, id={}",
-                    transaction.getDeduplicationKey(), transaction.getId());
-            return ProcessingResult.duplicate(transaction);
+                    managed.getDeduplicationKey(), managed.getId());
+            return ProcessingResult.duplicate(managed);
         }
 
         // --- Stage 2: Retry limit check ---
-        if (hasExceededRetries(transaction)) {
-            transaction.setStatus(TransactionStatus.FAILED);
-            repository.save(transaction);
+        if (hasExceededRetries(managed)) {
+            managed.setStatus(TransactionStatus.FAILED);
+            repository.save(managed);
             log.warn("Max retries exceeded — id={}, retryCount={}, maxRetries={}",
-                    transaction.getId(), transaction.getRetryCount(), maxRetries);
-            return ProcessingResult.deadLetter(transaction,
+                    managed.getId(), managed.getRetryCount(), maxRetries);
+            return ProcessingResult.deadLetter(managed,
                     "Exceeded max retries (" + maxRetries + ")");
         }
 
-        // --- Stage 3: Happy path — mark PROCESSED and persist ---
-        transaction.setStatus(TransactionStatus.PROCESSED);
-        repository.save(transaction);
+        // --- Stage 3: Happy path ---
+        managed.setStatus(TransactionStatus.PROCESSED);
+        repository.save(managed);
         log.info("Transaction PROCESSED — id={}, deduplicationKey={}",
-                transaction.getId(), transaction.getDeduplicationKey());
-        return ProcessingResult.success(transaction);
+                managed.getId(), managed.getDeduplicationKey());
+        return ProcessingResult.success(managed);
     }
 
     /**
-     * Increments retryCount and persists. Called by the consumer on processing exceptions.
-     * Separated from process() so retry state is updated even when the pipeline throws.
+     * Reload from DB before incrementing retry — incoming is detached.
      */
-    public void incrementRetry(Transaction transaction) {
-        transaction.setRetryCount(transaction.getRetryCount() + 1);
-        transaction.setStatus(TransactionStatus.FAILED);
-        repository.save(transaction);
-        log.warn("Retry incremented — id={}, newRetryCount={}",
-                transaction.getId(), transaction.getRetryCount());
+    public void incrementRetry(Transaction incoming) {
+        repository.findById(incoming.getId()).ifPresentOrElse(managed -> {
+            managed.setRetryCount(managed.getRetryCount() + 1);
+            managed.setStatus(TransactionStatus.FAILED);
+            repository.save(managed);
+            log.warn("Retry incremented — id={}, newRetryCount={}",
+                    managed.getId(), managed.getRetryCount());
+        }, () -> log.error("Cannot increment retry — transaction not found in DB, id={}",
+                incoming.getId()));
     }
 
-    private boolean isDuplicate(Transaction transaction) {
-        return repository.findByDeduplicationKey(transaction.getDeduplicationKey())
-                .map(existing -> !existing.getId().equals(transaction.getId()))
+    private boolean isDuplicate(Transaction managed) {
+        return repository.findByDeduplicationKey(managed.getDeduplicationKey())
+                .map(existing -> !existing.getId().equals(managed.getId()))
                 .orElse(false);
     }
 
-    private boolean hasExceededRetries(Transaction transaction) {
-        return transaction.getRetryCount() >= maxRetries;
+    private boolean hasExceededRetries(Transaction managed) {
+        return managed.getRetryCount() >= maxRetries;
     }
 }

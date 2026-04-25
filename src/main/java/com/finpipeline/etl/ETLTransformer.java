@@ -8,7 +8,6 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.Instant;
 import java.time.LocalDateTime;
 
 /**
@@ -73,7 +72,7 @@ public class ETLTransformer {
      * processedAt marks when the pipeline touched it.
      */
     private void enrichMetadata(Transaction transaction) {
-        transaction.setProcessedAt(LocalDateTime.from(Instant.now()));
+        transaction.setProcessedAt(LocalDateTime.now());
     }
 
     /**

@@ -94,6 +94,33 @@ RabbitMQ Management UI: [http://localhost:15672](http://localhost:15672) — log
 H2 Console: [http://localhost:8080/h2-console](http://localhost:8080/h2-console)
 JDBC URL: `jdbc:h2:mem:finpipeline`
 
+### Generate test data
+```
+POST http://localhost:8080/api/v1/transactions/generate/batch/10
+```
+### ⚠️ Queue purge required on restart
+
+This project uses H2 (in-memory database). All data is lost on every app restart.
+RabbitMQ queues are durable — messages persist across restarts.
+
+**On every restart:** purge both queues before generating new data, otherwise
+the consumer will attempt to process messages referencing IDs that no longer
+exist in H2.
+
+Purge via RabbitMQ Management UI → Queues → Purge, or via CLI:
+```bash
+rabbitmqadmin purge queue name=transaction.queue
+rabbitmqadmin purge queue name=transaction.dlq
+```
+In production this constraint disappears — a persistent database (PostgreSQL, etc.)
+retains data across restarts and no purge is needed.
+
+### JPA + Message Broker: detached entity pattern
+
+Entities deserialized from RabbitMQ JSON are **detached** from the JPA session.
+The `IdempotentProcessor` reloads each entity by ID from the database before
+mutating and saving it. This is the correct pattern for any pipeline where JPA
+entities travel as broker messages — bypassing it causes `StaleObjectStateException`.
 ---
 
 ## API Endpoints
