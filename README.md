@@ -52,8 +52,8 @@ A compact, highly technical Spring Boot portfolio project demonstrating advanced
 
 ```
 REST API → H2 save → RabbitMQ → Rule Engine → ETL Transformer → Idempotency → Reconciliation → Reports
-  ✅          ✅          ✅          🔜               🔜               🔜             🔜            🔜
-```
+  ✅          ✅          ✅          ✅               ✅               ✅             🔜            🔜
+  ```
 
 ---
 
@@ -187,9 +187,19 @@ src/main/java/com/finpipeline/
 │   └── TransactionRepository.java      # Spring Data JPA queries
 ├── generator/
 │   └── TransactionDataGenerator.java   # Mock data producer
-├── rules/                              # 🔜 Day 2 — Rule Engine
-├── etl/                                # 🔜 Day 2 — ETL Transformer
-├── processor/                          # 🔜 Day 2 — Consumer + Idempotency
+├── rules/
+│   ├── TransactionRule.java            # Strategy Pattern interface
+│   ├── RuleResult.java                 # Immutable result record
+│   ├── RuleEngine.java                 # Orchestrates all rules
+│   ├── AmountValidationRule.java       # Rejects invalid amounts
+│   ├── CurrencyValidationRule.java     # Allowlist + per-source restrictions
+│   └── SourceSystemRule.java           # Enforces type/source combinations
+├── etl/
+│   └── ETLTransformer.java             # Enrichment, normalization, source mapping
+├── processor/
+│   ├── TransactionConsumer.java        # @RabbitListener pipeline orchestrator
+│   ├── IdempotentProcessor.java        # Dedup + retry + DLQ routing
+│   └── ProcessingResult.java           # Immutable outcome value object    
 └── reconciliation/                     # 🔜 Day 3 — Scheduled job + reports
 ```
 
@@ -260,12 +270,12 @@ Floating-point arithmetic has precision errors that are unacceptable in financia
 - REST API — single ingest, batch ingest, mock generator
 - Spring Data JPA repository
 
-### Day 2 🔜 — Business Logic
-- `TransactionConsumer` — `@RabbitListener` entry point
-- `RuleEngine` — Strategy Pattern, pluggable rules per source system
-- `ETLTransformer` — enrichment, schema normalization
-- `IdempotentProcessor` — dedup key check, retry logic, DLQ routing
-- Unit tests per rule and transformer
+### Day 2 ✅ — Business Logic
+- `TransactionConsumer` — `@RabbitListener` pipeline orchestrator
+- `RuleEngine` — Strategy Pattern, 3 pluggable rules (amount, currency, source system)
+- `ETLTransformer` — amount normalization, currency cleanup, per-source schema mapping
+- `IdempotentProcessor` — dedup key check, retry tracking, DLQ routing signal
+- `ProcessingResult` — immutable outcome record decoupling processor from broker
 
 ### Day 3 🔜 — Reconciliation & Output
 - `@Scheduled` reconciliation job
@@ -278,6 +288,9 @@ Floating-point arithmetic has precision errors that are unacceptable in financia
 ## Git Log
 
 ```
+feat: consumer pipeline, idempotent processor, ETL transformer, DLQ routing
+feat: add idempotent processor with dedup, retry tracking, and DLQ signal
+feat: add rule engine (Strategy Pattern) and ETL transformer
 feat: day 1 complete — WebFlux REST API, RabbitMQ broker, JPA entity, mock data generator
 feat: add RabbitMQ config with main queue, DLQ, and JSON serialization
 feat: initial Spring Boot project setup
