@@ -42,7 +42,7 @@ public class TransactionController {
                     .build();
 
             Transaction saved = repository.save(tx);
-            publisher.publish(saved);
+            publisher.publishAsync(saved); // ← שינוי מ-publish ל-publishAsync
             return ResponseEntity.accepted().body("Transaction queued: " + saved.getId());
         }).subscribeOn(Schedulers.boundedElastic());
     }
