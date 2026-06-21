@@ -65,7 +65,11 @@ REST API → H2 save → RabbitMQ → Rule Engine → ETL Transformer → Idempo
 - **Dead Letter Queue** — failed messages are routed to DLQ after max retries; never lost
 - **Reactive API** — WebFlux with `Mono`/`Flux`; blocking JPA calls offloaded to `boundedElastic` scheduler
 - **Builder Pattern** — Lombok `@Builder` for clean, readable entity construction
-
+- **Optimistic locking** — `@Version` on Transaction entity prevents silent data corruption
+  when two consumers attempt to update the same row concurrently.
+  The second writer gets `OptimisticLockException` and RabbitMQ retries automatically.
+- **Defense in depth** — Duplicate detection at two layers: controller returns 409 at ingest,
+  `IdempotentProcessor` catches any that reach the queue and marks them `DUPLICATE`.
 ---
 
 ## Running Locally
@@ -97,6 +101,10 @@ JDBC URL: `jdbc:h2:mem:finpipeline`
 ### Generate test data
 ```
 POST http://localhost:8080/api/v1/transactions/generate/batch/10
+Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8080/api/v1/transactions" `
+  -ContentType "application/json" `
+  -Body '{"deduplicationKey":"timeout-test-001","sourceSystem":"BANK_API","transactionType":"PAYMENT","amount":500.00,"currency":"ILS","rawPayload":"{}"}'
 ```
 ### ⚠️ Queue purge required on restart
 
@@ -260,7 +268,86 @@ BigDecimal amount = BigDecimal.valueOf(value).setScale(2, RoundingMode.HALF_UP);
 Floating-point arithmetic has precision errors that are unacceptable in financial systems.
 
 ---
+## Concurrency Model
 
+The pipeline separates work across four distinct thread pools,
+each optimized for its workload:
+
+| Thread Pool | Threads | Purpose |
+|---|---|---|
+| Netty event loop | 2–4 | Non-blocking HTTP request handling |
+| `boundedElastic` | up to 10 | Blocking JPA/DB operations |
+| `pipelineExecutor` | 4–10 | Async RabbitMQ publishing |
+| `ntContainer` | 1–5 | RabbitMQ message consumption |
+
+### Why separate pools?
+Each layer is isolated — a slow DB call never blocks the HTTP layer,
+and a slow RabbitMQ publish never delays the HTTP response.
+
+### Async publish flow
+```
+[boundedElastic]  save to H2 → return 202 immediately
+      │
+      └──► [pipeline-1]  publishAsync() → RabbitMQ
+                │
+                └──► [ntContainer#0-1]  consume → Rules → ETL → persist
+```
+---
+
+## Observability
+
+All pipeline outcomes are instrumented with Micrometer counters and timers,
+exposed via Spring Actuator at `/actuator/metrics`.
+
+| Metric | Type | Description |
+|---|---|---|
+| `pipeline.transactions.processed` | Counter | Successfully processed transactions |
+| `pipeline.transactions.failed` | Counter | Transactions that failed processing |
+| `pipeline.transactions.duplicate` | Counter | Transactions rejected as duplicates |
+| `pipeline.transactions.dlq` | Counter | Transactions routed to Dead Letter Queue |
+| `pipeline.publish.timeout` | Counter | Async publish timeouts |
+| `pipeline.processing.duration` | Timer | End-to-end processing time per transaction |
+
+### Example queries
+
+```powershell
+# Processed count
+GET /actuator/metrics/pipeline.transactions.processed
+
+# Average processing time
+GET /actuator/metrics/pipeline.processing.duration
+```
+
+### Production monitoring
+Micrometer is vendor-neutral — the same counters feed into Prometheus,
+DataDog, or AWS CloudWatch with zero code changes. Only configuration changes.
+
+### Observed performance
+Average processing time: ~26ms per transaction end-to-end.
+
+---
+
+## Testing
+
+```powershell
+./mvnw test
+```
+
+| Test class | What it covers |
+|---|---|
+| `AmountValidationRuleTest` | Boundary values, null handling, happy path |
+| `RuleEngineTest` | Fail-fast behavior, mock interactions, rule ordering |
+| `ETLTransformerTest` | Per-source amount conversion, currency normalization |
+
+### Key testing decisions
+- **Mockito** for `RuleEngineTest` — isolates the engine from real rule implementations.
+  If a rule has a bug, only that rule's test fails, not the engine's.
+- **No mocks** for `ETLTransformerTest` — pure business logic with no dependencies,
+  tested directly with `new ETLTransformer()`.
+- **`isEqualByComparingTo`** for all `BigDecimal` assertions —
+  `equals()` on BigDecimal compares scale too (`100.1 ≠ 100.10`), which breaks
+  financial comparisons. `compareTo` checks value only.
+---
 ## Roadmap
 
 ### Day 1 ✅ — Core Infrastructure
@@ -277,7 +364,19 @@ Floating-point arithmetic has precision errors that are unacceptable in financia
 - `IdempotentProcessor` — dedup key check, retry tracking, DLQ routing signal
 - `ProcessingResult` — immutable outcome record decoupling processor from broker
 
-### Day 3 🔜 — Reconciliation & Output
+### Day 3 ✅ — Concurrency and Unit Tests
+- Async publishing — `@Async` with bounded `ThreadPoolTaskExecutor`
+- Unit tests — JUnit 5, Mockito, AssertJ
+- CI pipeline — GitHub Actions, build + test on every push
+- ### Interview Prep Additions ✅
+- `@Version` optimistic locking on Transaction entity
+- Micrometer metrics + Actuator endpoints
+- `@Async` publishing with `ThreadPoolTaskExecutor` (core=4, max=10)
+- `CompletableFuture.orTimeout()` — 5 second publish timeout
+- Unit tests — JUnit 5, Mockito, AssertJ
+- GitHub Actions CI pipeline
+- Defense in depth duplicate detection (controller + consumer layers)
+### Day 4 🔜 — Reconciliation & Output
 - `@Scheduled` reconciliation job
 - Multi-stage SQL matching with indexing
 - CSV + JSON report generation
