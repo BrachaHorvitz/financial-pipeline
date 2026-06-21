@@ -30,6 +30,16 @@ public class TransactionController {
     @PostMapping
     public Mono<ResponseEntity<String>> ingest(@RequestBody @Valid TransactionRequest request) {
         return Mono.fromCallable(() -> {
+            // check if already exists before trying to save
+            if (repository.findByDeduplicationKey(request.deduplicationKey()).isPresent()) {
+                log.info("Duplicate deduplicationKey detected at ingest — key={}",
+                        request.deduplicationKey());
+                return ResponseEntity
+                        .status(HttpStatus.CONFLICT)
+                        .body("Duplicate transaction — key already exists: "
+                                + request.deduplicationKey());
+            }
+
             Transaction tx = Transaction.builder()
                     .deduplicationKey(request.deduplicationKey())
                     .sourceSystem(Transaction.SourceSystem.valueOf(request.sourceSystem()))
@@ -42,11 +52,12 @@ public class TransactionController {
                     .build();
 
             Transaction saved = repository.save(tx);
-            publisher.publishAsync(saved); // ← שינוי מ-publish ל-publishAsync
-            return ResponseEntity.accepted().body("Transaction queued: " + saved.getId());
+            publisher.publishAsync(saved);
+            return ResponseEntity.accepted()
+                    .body("Transaction queued: " + saved.getId());
+
         }).subscribeOn(Schedulers.boundedElastic());
     }
-
     @PostMapping("/batch")
     public Flux<String> ingestBatch(@RequestBody List<TransactionRequest> requests) {
         return Flux.fromIterable(requests)
