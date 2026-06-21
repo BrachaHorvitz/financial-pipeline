@@ -2,6 +2,7 @@ package com.finpipeline.broker;
 
 import com.finpipeline.config.RabbitMQConfig;
 import com.finpipeline.domain.Transaction;
+import io.micrometer.core.instrument.Counter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -13,13 +14,20 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 @Component
-@RequiredArgsConstructor
 @Slf4j
 public class TransactionEventPublisher {
 
     private static final long PUBLISH_TIMEOUT_SECONDS = 5;
 
     private final RabbitTemplate rabbitTemplate;
+    private final Counter timeoutCounter;
+
+    public TransactionEventPublisher(RabbitTemplate rabbitTemplate,
+                                     Counter timeoutCounter) {
+        this.rabbitTemplate = rabbitTemplate;
+        this.timeoutCounter = timeoutCounter;
+    }
+
 
     /**
      * Synchronous publish — used when caller must confirm delivery before continuing.
@@ -58,10 +66,11 @@ public class TransactionEventPublisher {
                 .orTimeout(PUBLISH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                 .exceptionally(ex -> {
                     if (ex instanceof TimeoutException) {
-                        log.error("[BROKER] Publish TIMED OUT after {}s — transaction id={}",
+                        log.error("[BROKER] Publish TIMED OUT after {}s — id={}",
                                 PUBLISH_TIMEOUT_SECONDS, transaction.getId());
+                        timeoutCounter.increment(); // ← מגדיל את המונה
                     } else {
-                        log.error("[BROKER] Publish FAILED — transaction id={}, error={}",
+                        log.error("[BROKER] Publish FAILED — id={}, error={}",
                                 transaction.getId(), ex.getMessage(), ex);
                     }
                     return null;
