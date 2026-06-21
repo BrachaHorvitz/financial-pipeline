@@ -51,4 +51,13 @@ public class Transaction {
     private LocalDateTime receivedAt;
     private LocalDateTime processedAt;
     private Integer retryCount;
+
+    /**
+     * Optimistic locking version field.
+     * Hibernate increments this on every update.
+     * If two threads try to update the same row concurrently,
+     * the second one gets OptimisticLockException — not silent data corruption.
+     */
+    @Version
+    private Long version;
 }
