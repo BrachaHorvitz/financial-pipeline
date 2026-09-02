@@ -1,0 +1,49 @@
+{
+  "family": "finpipeline",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::800075447618:role/finpipeline-task-execution-role",
+
+  "containerDefinitions": [
+    {
+      "name": "finpipeline-app",
+      "image": "800075447618.dkr.ecr.il-central-1.amazonaws.com/finpipeline:latest",
+      "essential": true,
+
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+
+      "environment": [
+        { "name": "SPRING_DATASOURCE_URL",                "value": "jdbc:postgresql://finpipeline-db.c788iauaq5fo.il-central-1.rds.amazonaws.com:5432/finpipeline" },
+        { "name": "SPRING_DATASOURCE_USERNAME",           "value": "finpipeline" },
+        { "name": "SPRING_DATASOURCE_PASSWORD",           "value": "<SET_VIA_SECRETS_MANAGER>" },
+        { "name": "SPRING_DATASOURCE_DRIVER_CLASS_NAME",  "value": "org.postgresql.Driver" },
+        { "name": "SPRING_JPA_DATABASE_PLATFORM",         "value": "org.hibernate.dialect.PostgreSQLDialect" },
+        { "name": "SPRING_JPA_HIBERNATE_DDL_AUTO",        "value": "update" },
+
+        { "name": "SPRING_RABBITMQ_HOST",                 "value": "b-e7c4eb81-9623-44a8-b9c0-94bdf329ff5e.mq.il-central-1.on.aws" },
+        { "name": "SPRING_RABBITMQ_PORT",                 "value": "5671" },
+        { "name": "SPRING_RABBITMQ_USERNAME",             "value": "admin" },
+        { "name": "SPRING_RABBITMQ_PASSWORD",             "value": "<SET_VIA_SECRETS_MANAGER>" },
+        { "name": "SPRING_RABBITMQ_SSL_ENABLED",          "value": "true" },
+
+        { "name": "MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE", "value": "health,info,metrics" }
+      ],
+
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/ecs/finpipeline",
+          "awslogs-region":        "il-central-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
