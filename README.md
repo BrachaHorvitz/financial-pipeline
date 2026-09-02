@@ -12,11 +12,13 @@ A compact, highly technical Spring Boot portfolio project demonstrating advanced
 |---|---|---|
 | Framework | Spring Boot 3.3 + WebFlux | Reactive, non-blocking |
 | Message Broker | RabbitMQ | Exchange, queue, Dead Letter Queue |
-| Database | H2 in-memory + Spring Data JPA | Zero setup, runs anywhere |
+| Database | H2 in-memory (local) / PostgreSQL (Docker) + Spring Data JPA | H2 for zero-setup local runs; PostgreSQL when running via Docker Compose |
 | Serialization | Jackson JSON | Messages stored as readable JSON |
 | Validation | Bean Validation | `@NotBlank`, `@Positive`, `@NotNull` |
 | Build | Maven | `./mvnw spring-boot:run` |
 | Testing | JUnit 5 + StepVerifier | Reactive test support |
+| Containerization | Docker + Docker Compose | Multi-stage `Dockerfile`; Compose runs app + PostgreSQL + RabbitMQ |
+| Cloud Deployment | AWS ECS (Fargate) | Task definition for running the containerized app on AWS — see [AWS_deploy.md](AWS_deploy.md) |
 
 ---
 
@@ -25,7 +27,7 @@ A compact, highly technical Spring Boot portfolio project demonstrating advanced
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Ingest Layer                             │
-│   REST API (WebFlux)  ──►  H2 Database  ──►  RabbitMQ Queue    │
+│   REST API (WebFlux)  ──►  Database  ──►  RabbitMQ Queue       │
 │   POST /transactions        PENDING              publisher       │
 └─────────────────────────────────────────────────────────────────┘
                                                        │
@@ -39,21 +41,15 @@ A compact, highly technical Spring Boot portfolio project demonstrating advanced
 │                    Idempotent Processor                         │
 │                    dedup key + retry logic + DLQ routing        │
 └─────────────────────────────────────────────────────────────────┘
-                                                       │
-                                                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     Reconciliation Layer                        │
-│   @Scheduled Job  ──►  Multi-stage SQL matching  ──►  Reports   │
-│                              indexing               CSV + JSON  │
-└─────────────────────────────────────────────────────────────────┘
 ```
+
+Database is H2 in-memory for local (`./mvnw spring-boot:run`) or PostgreSQL when run via `docker compose` — see [Run with Docker](#run-with-docker).
 
 ### Full Data Flow
 
 ```
-REST API → H2 save → RabbitMQ → Rule Engine → ETL Transformer → Idempotency → Reconciliation → Reports
-  ✅          ✅          ✅          ✅               ✅               ✅             🔜            🔜
-  ```
+REST API → DB save → RabbitMQ → Rule Engine → ETL Transformer → Idempotency
+```
 
 ---
 
@@ -72,7 +68,55 @@ REST API → H2 save → RabbitMQ → Rule Engine → ETL Transformer → Idempo
   `IdempotentProcessor` catches any that reach the queue and marks them `DUPLICATE`.
 ---
 
-## Running Locally
+## Run with Docker
+
+The included `Dockerfile` and `docker-compose.yml` run the app together with
+real PostgreSQL and RabbitMQ containers — no local Java, Maven, or RabbitMQ
+install required.
+
+### Prerequisites
+
+- Docker Desktop (or Docker Engine + Compose plugin)
+
+### Start everything
+
+```bash
+docker compose up --build
+```
+
+This builds the app image (multi-stage Maven build, then a slim JRE runtime
+image) and starts three containers:
+
+| Service | Image | Port(s) |
+|---|---|---|
+| `app` | built from `Dockerfile` | `8080` |
+| `postgres` | `postgres:16-alpine` | `5432` |
+| `rabbitmq` | `rabbitmq:3-management-alpine` | `5672` (AMQP), `15672` (management UI) |
+
+The app waits for both `postgres` and `rabbitmq` to report healthy before
+starting, and connects to **PostgreSQL** (not H2) via environment variables
+that override `application.yml`.
+
+- App: [http://localhost:8080](http://localhost:8080)
+- RabbitMQ Management UI: [http://localhost:15672](http://localhost:15672) — login: `guest` / `guest`
+
+### Stop everything
+
+```bash
+docker compose down       # stop and remove containers
+docker compose down -v    # also delete the Postgres/RabbitMQ data volumes
+```
+
+### AWS deployment
+
+[AWS_deploy.md](AWS_deploy.md) walks through pushing this Docker image to
+Amazon ECR and running it on ECS Fargate, using `ecs-task-definition.json`
+as the task definition (RDS PostgreSQL and Amazon MQ replace the local
+Postgres/RabbitMQ containers).
+
+---
+
+## Running Locally (without Docker)
 
 ### Prerequisites
 
@@ -207,8 +251,7 @@ src/main/java/com/finpipeline/
 ├── processor/
 │   ├── TransactionConsumer.java        # @RabbitListener pipeline orchestrator
 │   ├── IdempotentProcessor.java        # Dedup + retry + DLQ routing
-│   └── ProcessingResult.java           # Immutable outcome value object    
-└── reconciliation/                     # 🔜 Day 3 — Scheduled job + reports
+│   └── ProcessingResult.java           # Immutable outcome value object
 ```
 
 ---
@@ -251,7 +294,7 @@ The API returns `202 Accepted`, not `200 OK`. This is intentional:
 - `200 OK` — request was processed synchronously and is complete
 - `202 Accepted` — request was received and is being processed asynchronously
 
-The transaction is saved to H2 and published to RabbitMQ before returning. The actual business processing (rule validation, ETL, idempotency check) happens in the consumer — asynchronously, after the HTTP response is already sent.
+The transaction is saved to the database and published to RabbitMQ before returning. The actual business processing (rule validation, ETL, idempotency check) happens in the consumer — asynchronously, after the HTTP response is already sent.
 
 ---
 
@@ -286,7 +329,7 @@ and a slow RabbitMQ publish never delays the HTTP response.
 
 ### Async publish flow
 ```
-[boundedElastic]  save to H2 → return 202 immediately
+[boundedElastic]  save to DB → return 202 immediately
       │
       └──► [pipeline-1]  publishAsync() → RabbitMQ
                 │
@@ -348,49 +391,28 @@ Average processing time: ~26ms per transaction end-to-end.
   `equals()` on BigDecimal compares scale too (`100.1 ≠ 100.10`), which breaks
   financial comparisons. `compareTo` checks value only.
 ---
-## Roadmap
+## Scope
 
-### Day 1 ✅ — Core Infrastructure
-- Spring Boot + WebFlux setup
-- Transaction JPA entity with deduplication key
-- RabbitMQ config — main queue, DLQ, exchange, JSON serialization
-- REST API — single ingest, batch ingest, mock generator
-- Spring Data JPA repository
+This project implements the ingest-through-processing half of a financial
+transaction pipeline:
 
-### Day 2 ✅ — Business Logic
-- `TransactionConsumer` — `@RabbitListener` pipeline orchestrator
-- `RuleEngine` — Strategy Pattern, 3 pluggable rules (amount, currency, source system)
-- `ETLTransformer` — amount normalization, currency cleanup, per-source schema mapping
-- `IdempotentProcessor` — dedup key check, retry tracking, DLQ routing signal
-- `ProcessingResult` — immutable outcome record decoupling processor from broker
+- A reactive WebFlux REST API for single and batch transaction ingest, plus
+  a mock data generator
+- Persistence via Spring Data JPA, with optimistic locking (`@Version`) on
+  the `Transaction` entity
+- Event-driven processing over RabbitMQ — a durable queue, a Dead Letter
+  Queue, and JSON message serialization
+- A pluggable rule engine (Strategy Pattern) for per-source validation
+- An ETL transformer for amount/currency normalization and source mapping
+- Idempotent processing with a deduplication key, retry tracking, and DLQ
+  routing, enforced at both the controller (409 on ingest) and consumer layers
+- Async publishing on a bounded thread pool with a publish timeout
+- Micrometer metrics exposed via Spring Actuator
+- Docker Compose for local containerized runs (PostgreSQL + RabbitMQ) and
+  an ECS Fargate task definition for AWS deployment
+- Unit tests for the rule engine, ETL transformer, and controller layer;
+  CI via GitHub Actions
 
-### Day 3 ✅ — Concurrency and Unit Tests
-- Async publishing — `@Async` with bounded `ThreadPoolTaskExecutor`
-- Unit tests — JUnit 5, Mockito, AssertJ
-- CI pipeline — GitHub Actions, build + test on every push
-- ### Interview Prep Additions ✅
-- `@Version` optimistic locking on Transaction entity
-- Micrometer metrics + Actuator endpoints
-- `@Async` publishing with `ThreadPoolTaskExecutor` (core=4, max=10)
-- `CompletableFuture.orTimeout()` — 5 second publish timeout
-- Unit tests — JUnit 5, Mockito, AssertJ
-- GitHub Actions CI pipeline
-- Defense in depth duplicate detection (controller + consumer layers)
-### Day 4 🔜 — Reconciliation & Output
-- `@Scheduled` reconciliation job
-- Multi-stage SQL matching with indexing
-- CSV + JSON report generation
-- Micrometer metrics + Actuator endpoints
-
----
-
-## Git Log
-
-```
-feat: consumer pipeline, idempotent processor, ETL transformer, DLQ routing
-feat: add idempotent processor with dedup, retry tracking, and DLQ signal
-feat: add rule engine (Strategy Pattern) and ETL transformer
-feat: day 1 complete — WebFlux REST API, RabbitMQ broker, JPA entity, mock data generator
-feat: add RabbitMQ config with main queue, DLQ, and JSON serialization
-feat: initial Spring Boot project setup
-```
+**Not implemented:** a reconciliation/reporting stage (matching processed
+transactions against an external source and generating CSV/JSON reports)
+was planned but does not exist in the codebase.
