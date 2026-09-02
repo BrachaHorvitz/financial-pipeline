@@ -1,0 +1,131 @@
+# docker-compose.yml
+# Runs three services together: PostgreSQL, RabbitMQ, and the Spring Boot app.
+#
+# Usage:
+#   docker compose up --build      ← build image + start everything
+#   docker compose up -d --build   ← same but detached (runs in background)
+#   docker compose down            ← stop and remove containers
+#   docker compose down -v         ← also delete the named volumes (wipes DB data)
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine          # alpine = small footprint; 16 = stable LTS version
+    container_name: finpipeline-postgres
+
+    environment:
+      # These three variables are read by the Postgres entrypoint script to
+      # create the database and superuser on first boot.
+      POSTGRES_DB: finpipeline         # database name
+      POSTGRES_USER: finpipeline       # username the app will connect with
+      POSTGRES_PASSWORD: finpipeline   # password (fine for local dev; use secrets in prod)
+
+    ports:
+      # HOST_PORT:CONTAINER_PORT
+      # Expose Postgres to the host so you can connect with DBeaver / psql.
+      # The app itself talks to Postgres over the internal Docker network,
+      # so it does NOT need this — but it's handy for debugging.
+      - "5432:5432"
+
+    volumes:
+      # Named volume: Postgres writes data here.  Docker manages the storage.
+      # Without this, all data is lost when the container is removed.
+      - postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      # pg_isready exits 0 when Postgres is accepting connections.
+      # The app service uses this to know when it is safe to start.
+      test: ["CMD-SHELL", "pg_isready -U finpipeline -d finpipeline"]
+      interval: 5s     # check every 5 seconds
+      timeout: 5s      # fail the check if it takes longer than 5 s
+      retries: 10      # mark the container unhealthy after 10 consecutive failures
+
+
+  # ── RabbitMQ ───────────────────────────────────────────────────────────────
+  rabbitmq:
+    # The "-management" variant ships with the web management UI on port 15672.
+    # Removing "-management" gives a smaller image without the UI.
+    image: rabbitmq:3-management-alpine
+    container_name: finpipeline-rabbitmq
+
+    environment:
+      # RabbitMQ creates this user and vhost on first boot.
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+    ports:
+      - "5672:5672"    # AMQP protocol — what the Spring app connects to
+      - "15672:15672"  # Management UI — open http://localhost:15672 in your browser
+                       #                  login: guest / guest
+
+    volumes:
+      # Persist queue definitions and messages across container restarts.
+      - rabbitmq-data:/var/lib/rabbitmq
+
+    healthcheck:
+      # rabbitmq-diagnostics check_port_connectivity verifies the AMQP port is up.
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+
+  # ── Spring Boot Application ─────────────────────────────────────────────────
+  app:
+    # "build: ." tells Compose to build the image using our Dockerfile in the
+    # current directory instead of pulling one from Docker Hub.
+    build: .
+    container_name: finpipeline-app
+
+    ports:
+      - "8080:8080"    # The app's HTTP port — hit http://localhost:8080
+
+    # Don't start until both dependencies report healthy.
+    # "service_healthy" requires a healthcheck to be defined on the dependency.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+    # Spring Boot reads environment variables and maps them to properties.
+    # The naming convention: SPRING_DATASOURCE_URL → spring.datasource.url
+    # These values OVERRIDE whatever is in application.yml at runtime.
+    environment:
+
+      # ── Database ─────────────────────────────────────────
+      # "postgres" is the hostname of the postgres service on the Docker network.
+      # Docker Compose automatically creates a DNS entry for each service name.
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/finpipeline
+      SPRING_DATASOURCE_USERNAME: finpipeline
+      SPRING_DATASOURCE_PASSWORD: finpipeline
+      # application.yml hardcodes driver-class-name=org.h2.Driver.
+      # We must override it here; otherwise Spring hands the postgresql:// URL
+      # to the H2 driver, which rejects it with "claims to not accept jdbcUrl".
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      # Tell Hibernate to use PostgreSQL dialect so it generates correct SQL.
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
+      # "update" creates tables if they don't exist and alters them if the
+      # schema changes — safe for dev.  Use "validate" or Flyway in production.
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+
+      # ── RabbitMQ ─────────────────────────────────────────
+      # "rabbitmq" resolves to the RabbitMQ container on the Docker network.
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+
+      # ── Actuator ─────────────────────────────────────────
+      # Make the health endpoint visible from outside the container so Docker
+      # (or a load balancer) can check whether the app is alive.
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics
+
+
+# ── Named Volumes ──────────────────────────────────────────────────────────────
+# Declaring volumes here makes them "named" — Docker manages them and they
+# survive "docker compose down".  Run "docker compose down -v" to delete them.
+volumes:
+  postgres-data:
+  rabbitmq-data:

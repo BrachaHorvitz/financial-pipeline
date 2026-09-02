@@ -32,3 +32,6 @@ build/
 ### VS Code ###
 .vscode/
 architecture_summary_day2.md
+
+### Node ###
+node_modules/
