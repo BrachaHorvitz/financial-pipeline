@@ -25,7 +25,7 @@ public record ProcessingResult(
     }
 
     public static ProcessingResult duplicate(Transaction transaction) {
-        return new ProcessingResult(Outcome.DUPLICATE, transaction, "Duplicate deduplication key");
+        return new ProcessingResult(Outcome.DUPLICATE, transaction, "Redelivery of an already handled transaction");
     }
 
     public static ProcessingResult deadLetter(Transaction transaction, String reason) {

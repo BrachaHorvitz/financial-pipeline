@@ -62,9 +62,21 @@ class IdempotentProcessorTest {
     }
 
     @Test
+    @DisplayName("Redelivery of a terminally FAILED transaction is ignored (no second DLQ message)")
+    void redeliveryOfTerminalFailureIsIgnored() {
+        Transaction stored = tx(TransactionStatus.FAILED, 3);
+        when(repository.findById("id-1")).thenReturn(Optional.of(stored));
+
+        ProcessingResult result = processor.process(tx(TransactionStatus.PENDING, 0));
+
+        assertThat(result.isDuplicate()).isTrue();
+        verify(repository, never()).save(any());
+    }
+
+    @Test
     @DisplayName("Exceeded retries dead-letters and persists FAILED")
     void exceededRetriesDeadLetters() {
-        Transaction stored = tx(TransactionStatus.FAILED, 3);
+        Transaction stored = tx(TransactionStatus.PENDING, 3);
         when(repository.findById("id-1")).thenReturn(Optional.of(stored));
 
         ProcessingResult result = processor.process(tx(TransactionStatus.PENDING, 3));
@@ -83,6 +95,44 @@ class IdempotentProcessorTest {
         processor.markFailed(tx(TransactionStatus.PENDING, 0));
 
         assertThat(stored.getStatus()).isEqualTo(TransactionStatus.FAILED);
+        verify(repository).save(stored);
+    }
+
+    @Test
+    @DisplayName("markFailed leaves a PROCESSED row untouched and reports it")
+    void markFailedSkipsProcessed() {
+        Transaction stored = tx(TransactionStatus.PROCESSED, 0);
+        when(repository.findById("id-1")).thenReturn(Optional.of(stored));
+
+        assertThat(processor.markFailed(tx(TransactionStatus.PENDING, 0))).isFalse();
+
+        assertThat(stored.getStatus()).isEqualTo(TransactionStatus.PROCESSED);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("incrementRetry never downgrades a PROCESSED row")
+    void incrementRetrySkipsProcessed() {
+        Transaction stored = tx(TransactionStatus.PROCESSED, 0);
+        when(repository.findById("id-1")).thenReturn(Optional.of(stored));
+
+        processor.incrementRetry(tx(TransactionStatus.PENDING, 0));
+
+        assertThat(stored.getStatus()).isEqualTo(TransactionStatus.PROCESSED);
+        assertThat(stored.getRetryCount()).isZero();
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("incrementRetry marks a pending row FAILED and counts the attempt")
+    void incrementRetryCounts() {
+        Transaction stored = tx(TransactionStatus.PENDING, 0);
+        when(repository.findById("id-1")).thenReturn(Optional.of(stored));
+
+        processor.incrementRetry(tx(TransactionStatus.PENDING, 0));
+
+        assertThat(stored.getStatus()).isEqualTo(TransactionStatus.FAILED);
+        assertThat(stored.getRetryCount()).isEqualTo(1);
         verify(repository).save(stored);
     }
 }

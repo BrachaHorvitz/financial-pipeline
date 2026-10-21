@@ -50,6 +50,7 @@ class TransactionConsumerTest {
     void ruleRejectionGoesToDlq() {
         Transaction tx = tx();
         when(ruleEngine.evaluate(tx)).thenReturn(RuleResult.fail("R", "bad"));
+        when(processor.markFailed(tx)).thenReturn(true);
 
         consumer.consume(tx);
 
@@ -70,5 +71,42 @@ class TransactionConsumerTest {
         assertThatThrownBy(() -> consumer.consume(tx)).isInstanceOf(RuntimeException.class);
 
         verify(processor).incrementRetry(tx);
+    }
+
+    @Test
+    @DisplayName("Rule rejection of an already PROCESSED transaction is not failed or dead-lettered")
+    void ruleRejectionOfProcessedIsSkipped() {
+        Transaction tx = tx();
+        when(ruleEngine.evaluate(tx)).thenReturn(RuleResult.fail("R", "bad"));
+        when(processor.markFailed(tx)).thenReturn(false);
+
+        consumer.consume(tx);
+
+        verifyNoInteractions(rabbitTemplate);
+        assertThat(tx.getStatus()).isEqualTo(TransactionStatus.PENDING);
+    }
+
+    @Test
+    @DisplayName("Exhausted listener retries are persisted as FAILED and sent to the DLX")
+    void exhaustedRetriesGoToDlq() {
+        Transaction tx = tx();
+        when(processor.markFailed(tx)).thenReturn(true);
+
+        consumer.recoverExhausted(tx, new IllegalStateException("db down"));
+
+        verify(rabbitTemplate).convertAndSend(
+                RabbitMQConfig.DEAD_LETTER_EXCHANGE, RabbitMQConfig.DLQ_ROUTING_KEY, tx);
+        assertThat(tx.getStatus()).isEqualTo(TransactionStatus.FAILED);
+    }
+
+    @Test
+    @DisplayName("Exhausted retries on an already PROCESSED transaction do not dead-letter it")
+    void exhaustedRetriesOnProcessedAreSkipped() {
+        Transaction tx = tx();
+        when(processor.markFailed(tx)).thenReturn(false);
+
+        consumer.recoverExhausted(tx, new IllegalStateException("optimistic lock"));
+
+        verifyNoInteractions(rabbitTemplate);
     }
 }

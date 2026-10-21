@@ -24,12 +24,13 @@ import org.springframework.stereotype.Component;
  * Ack/nack uses acknowledgeMode=AUTO (Spring default):
  * - Successful processing or known outcomes (duplicate/DLQ) → message is acked
  * - Unexpected exceptions → the listener retries (spring.rabbitmq.listener.simple.retry);
- *   once attempts are exhausted the message is rejected without requeue and the
- *   queue's x-dead-letter-exchange routes it to the DLQ
+ *   once attempts are exhausted the message is handed to the recoverer, which
+ *   (see {@link DeadLetterRecoverer}) dead-letters it through {@link #recoverExhausted}
  *
- * DLQ routing is explicit: we publish to the DLX ourselves on DEAD_LETTER outcome
- * rather than relying solely on RabbitMQ's built-in DLQ, giving us full control
- * over the dead-letter payload and logging.
+ * DLQ routing is always explicit: every dead-letter path (rule rejection, DEAD_LETTER
+ * outcome, exhausted listener retries) goes through routeToDlq, so the DLQ payload
+ * (status FAILED), the DB state and the metrics stay consistent. The queue's own
+ * x-dead-letter arguments remain only as a safety net for messages the broker rejects.
  */
 @Component
 public class TransactionConsumer {
@@ -87,8 +88,7 @@ public class TransactionConsumer {
                 if (ruleResult.failed()) {
                     log.warn("Transaction rejected by rules — id={}, reason={}",
                             transaction.getId(), ruleResult.reason());
-                    idempotentProcessor.markFailed(transaction);
-                    routeToDlq(transaction, "Rule failure: " + ruleResult.reason());
+                    failAndDeadLetter(transaction, "Rule failure: " + ruleResult.reason());
                     return;
                 }
 
@@ -123,6 +123,28 @@ public class TransactionConsumer {
                 throw new RuntimeException("Pipeline failure for id=" + transaction.getId(), e);
             }
         });
+    }
+
+    /**
+     * Called by {@link DeadLetterRecoverer} once listener retries are exhausted.
+     */
+    public void recoverExhausted(Transaction transaction, Throwable cause) {
+        if (failAndDeadLetter(transaction, "Listener retries exhausted: " + cause.getMessage())) {
+            dlqCounter.increment();
+        }
+    }
+
+    /**
+     * Persist FAILED and dead-letter — unless the stored row is already PROCESSED
+     * (a redelivery of a finished transaction must not be failed or dead-lettered).
+     */
+    private boolean failAndDeadLetter(Transaction transaction, String reason) {
+        if (!idempotentProcessor.markFailed(transaction)) {
+            log.info("Skipping DLQ — already PROCESSED, id={}", transaction.getId());
+            return false;
+        }
+        routeToDlq(transaction, reason);
+        return true;
     }
 
     /**

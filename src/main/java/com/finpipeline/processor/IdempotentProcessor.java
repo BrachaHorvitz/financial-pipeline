@@ -51,9 +51,10 @@ public class IdempotentProcessor {
         // --- Stage 0: Redelivery check ---
         // RabbitMQ delivers at-least-once. If this row was already processed, skip it
         // without touching the stored (already ETL-transformed) values.
-        if (managed.getStatus() == TransactionStatus.PROCESSED) {
-            log.info("DUPLICATE delivery ignored — already processed, id={}, deduplicationKey={}",
-                    managed.getId(), managed.getDeduplicationKey());
+        // Terminal FAILED rows (retries exhausted) were already dead-lettered; do not DLQ them twice.
+        if (managed.getStatus() == TransactionStatus.PROCESSED || isTerminalFailure(managed)) {
+            log.info("Redelivery ignored — already handled, id={}, status={}, deduplicationKey={}",
+                    managed.getId(), managed.getStatus(), managed.getDeduplicationKey());
             return ProcessingResult.duplicate(managed);
         }
 
@@ -83,13 +84,23 @@ public class IdempotentProcessor {
     /**
      * Persist FAILED for a transaction rejected before reaching {@link #process}
      * (e.g. by the rule engine), so the DB matches what is sent to the DLQ.
+     *
+     * @return false if the stored row is already PROCESSED and was left untouched — the caller
+     *         must then not dead-letter it (a redelivered, already-processed message stays processed).
      */
-    public void markFailed(Transaction incoming) {
-        repository.findById(incoming.getId()).ifPresentOrElse(managed -> {
-            managed.setStatus(TransactionStatus.FAILED);
-            repository.save(managed);
-        }, () -> log.error("Cannot mark failed — transaction not found in DB, id={}",
-                incoming.getId()));
+    public boolean markFailed(Transaction incoming) {
+        Transaction managed = repository.findById(incoming.getId()).orElse(null);
+        if (managed == null) {
+            log.error("Cannot mark failed — transaction not found in DB, id={}", incoming.getId());
+            return true;
+        }
+        if (managed.getStatus() == TransactionStatus.PROCESSED) {
+            log.info("markFailed skipped — already PROCESSED, id={}", managed.getId());
+            return false;
+        }
+        managed.setStatus(TransactionStatus.FAILED);
+        repository.save(managed);
+        return true;
     }
 
     /**
@@ -97,6 +108,11 @@ public class IdempotentProcessor {
      */
     public void incrementRetry(Transaction incoming) {
         repository.findById(incoming.getId()).ifPresentOrElse(managed -> {
+            if (managed.getStatus() == TransactionStatus.PROCESSED) {
+                // A concurrent/redelivered attempt already finished it; never downgrade to FAILED.
+                log.info("Retry not incremented — already PROCESSED, id={}", managed.getId());
+                return;
+            }
             managed.setRetryCount(managed.getRetryCount() + 1);
             managed.setStatus(TransactionStatus.FAILED);
             repository.save(managed);
@@ -104,6 +120,10 @@ public class IdempotentProcessor {
                     managed.getId(), managed.getRetryCount());
         }, () -> log.error("Cannot increment retry — transaction not found in DB, id={}",
                 incoming.getId()));
+    }
+
+    private boolean isTerminalFailure(Transaction managed) {
+        return managed.getStatus() == TransactionStatus.FAILED && hasExceededRetries(managed);
     }
 
     private boolean hasExceededRetries(Transaction managed) {

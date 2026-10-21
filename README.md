@@ -67,9 +67,11 @@ REST API → DB save → RabbitMQ → Rule Engine → ETL Transformer → Idempo
 - **Defense in depth** — Duplicate handling at two layers: the controller returns 409 at ingest
   (pre-check, backed by the unique constraint so concurrent inserts also yield 409), and
   `IdempotentProcessor` ignores redelivered messages whose transaction is already `PROCESSED`
-  (RabbitMQ delivers at-least-once).
-- **Bounded retries** — listener retry (3 attempts, exponential backoff) then reject without
-  requeue; the queue's dead-letter exchange routes the message to the DLQ.
+  or terminally `FAILED` (RabbitMQ delivers at-least-once).
+- **Bounded retries** — listener retry (3 attempts, exponential backoff); when exhausted,
+  `DeadLetterRecoverer` dead-letters the message through the same explicit DLQ path used for rule
+  rejections (row marked `FAILED`, payload and metrics consistent). Already-`PROCESSED` rows are
+  never downgraded or dead-lettered by a redelivery.
 ---
 
 ## Run with Docker
@@ -208,6 +210,9 @@ Content-Type: application/json
 [ { ... }, { ... } ]
 ```
 
+Each item is validated like single ingest and processed independently. Response: one result per
+item (order not guaranteed): `{"deduplicationKey": "...", "status": "ACCEPTED|DUPLICATE|INVALID", "id": "...", "message": "..."}`.
+
 ### Generate mock data
 
 ```bash
@@ -272,7 +277,7 @@ src/main/java/com/finpipeline/
 | `transactionType` | String | `PAYMENT`, `REFUND`, `TRANSFER` |
 | `amount` | BigDecimal | Exact decimal — never `double` for money |
 | `currency` | String | `ILS`, `USD`, `EUR` |
-| `status` | String | `PENDING`, `PROCESSED`, `FAILED`, `DUPLICATE` |
+| `status` | String | `PENDING`, `PROCESSED`, `FAILED` |
 | `retryCount` | Integer | Incremented on processing failure |
 | `receivedAt` | LocalDateTime | Auto-set by `@CreationTimestamp` |
 | `processedAt` | LocalDateTime | Set when processing completes |
@@ -387,7 +392,7 @@ Processing time is available via `pipeline.processing.duration`.
 | `ETLTransformerTest` | Per-source amount conversion, currency normalization |
 | `TransactionControllerTest` | 202/409 on ingest, unique-constraint race, batch parity with single ingest |
 | `IdempotentProcessorTest` | Happy path, redelivery of processed transactions, retry limit, `markFailed` |
-| `TransactionConsumerTest` | Rule rejection persisted as `FAILED` and sent to the DLX; error rethrown for retry |
+| `TransactionConsumerTest` / `DeadLetterRecovererTest` | Rule rejection and exhausted retries persisted as `FAILED` and sent to the DLX; PROCESSED rows never dead-lettered |
 | `RabbitMQConfigTest` | DLQ binding routing key matches the key used for dead-lettering |
 
 ### Key testing decisions

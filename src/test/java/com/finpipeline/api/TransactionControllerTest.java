@@ -107,7 +107,9 @@ class TransactionControllerTest {
     @Test
     @DisplayName("Should return 409 when a concurrent insert hits the unique constraint")
     void shouldReturn409WhenUniqueConstraintViolated() {
-        when(repository.findByDeduplicationKey("test-key-001")).thenReturn(Optional.empty());
+        when(repository.findByDeduplicationKey("test-key-001"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(new Transaction()));
         when(repository.save(any()))
                 .thenThrow(new org.springframework.dao.DataIntegrityViolationException("unique"));
 
@@ -122,8 +124,36 @@ class TransactionControllerTest {
     }
 
     @Test
-    @DisplayName("Batch should skip duplicates, keep rawPayload and publish asynchronously")
-    void batchShouldDetectDuplicatesAndPublishAsync() {
+    @DisplayName("Other constraint violations are not reported as duplicates")
+    void nonUniqueConstraintViolationIsNotA409() {
+        when(repository.findByDeduplicationKey("test-key-001")).thenReturn(Optional.empty());
+        when(repository.save(any()))
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("not null"));
+
+        webTestClient.post()
+                .uri("/api/v1/transactions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(VALID_BODY)
+                .exchange()
+                .expectStatus().is5xxServerError();
+    }
+
+    @Test
+    @DisplayName("Unknown enum values on single ingest return 400, not 500")
+    void unknownEnumReturns400() {
+        webTestClient.post()
+                .uri("/api/v1/transactions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(VALID_BODY.replace("BANK_API", "NOPE"))
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Batch returns a result per item: ACCEPTED, DUPLICATE and INVALID")
+    void batchReturnsPerItemResults() {
         when(repository.findByDeduplicationKey("dup")).thenReturn(Optional.of(new Transaction()));
         when(repository.findByDeduplicationKey("new")).thenReturn(Optional.empty());
         when(repository.save(any())).thenAnswer(inv -> {
@@ -137,7 +167,12 @@ class TransactionControllerTest {
                   {"deduplicationKey":"dup","sourceSystem":"BANK_API","transactionType":"PAYMENT",
                    "amount":1,"currency":"ILS"},
                   {"deduplicationKey":"new","sourceSystem":"BANK_API","transactionType":"PAYMENT",
-                   "amount":1,"currency":"ILS","rawPayload":"{\\"a\\":1}"}
+                   "amount":1,"currency":"ILS","rawPayload":"{\\"a\\":1}"},
+                  {"deduplicationKey":"neg","sourceSystem":"BANK_API","transactionType":"PAYMENT",
+                   "amount":-5,"currency":"ILS"},
+                  {"deduplicationKey":"badenum","sourceSystem":"NOPE","transactionType":"PAYMENT",
+                   "amount":1,"currency":"ILS"},
+                  {"sourceSystem":"BANK_API","transactionType":"PAYMENT","amount":1,"currency":"ILS"}
                 ]
                 """;
 
@@ -147,9 +182,20 @@ class TransactionControllerTest {
                 .bodyValue(body)
                 .exchange()
                 .expectStatus().isOk()
-                .expectBody(String.class)
-                .value(b -> org.assertj.core.api.Assertions.assertThat(b)
-                        .contains("Duplicate transaction").contains("id-new"));
+                .expectBodyList(BatchItemResult.class)
+                .value(results -> {
+                    org.assertj.core.api.Assertions.assertThat(results)
+                            .extracting(BatchItemResult::status)
+                            .containsExactlyInAnyOrder(
+                                    BatchItemResult.Status.DUPLICATE,
+                                    BatchItemResult.Status.ACCEPTED,
+                                    BatchItemResult.Status.INVALID,
+                                    BatchItemResult.Status.INVALID,
+                                    BatchItemResult.Status.INVALID);
+                    org.assertj.core.api.Assertions.assertThat(results)
+                            .filteredOn(r -> r.status() == BatchItemResult.Status.ACCEPTED)
+                            .extracting(BatchItemResult::id).containsExactly("id-new");
+                });
 
         org.mockito.ArgumentCaptor<Transaction> captor =
                 org.mockito.ArgumentCaptor.forClass(Transaction.class);

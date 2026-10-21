@@ -23,7 +23,7 @@ public class Transaction {
     }
 
     public enum TransactionStatus {
-        PENDING, PROCESSED, FAILED, DUPLICATE
+        PENDING, PROCESSED, FAILED
     }
 
     @Id
