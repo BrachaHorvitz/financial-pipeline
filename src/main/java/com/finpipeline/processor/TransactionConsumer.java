@@ -1,5 +1,6 @@
 package com.finpipeline.processor;
 
+import com.finpipeline.config.RabbitMQConfig;
 import com.finpipeline.domain.Transaction;
 import com.finpipeline.domain.Transaction.TransactionStatus;
 import com.finpipeline.etl.ETLTransformer;
@@ -20,21 +21,21 @@ import org.springframework.stereotype.Component;
  * Listens on transaction.queue and runs each message through:
  *   RuleEngine → ETLTransformer → IdempotentProcessor
  *
- * Ack/nack is handled manually via acknowledgeMode=AUTO (Spring default):
+ * Ack/nack uses acknowledgeMode=AUTO (Spring default):
  * - Successful processing or known outcomes (duplicate/DLQ) → message is acked
- * - Unexpected exceptions → message is nacked and requeued up to maxRetries
+ * - Unexpected exceptions → the listener retries (spring.rabbitmq.listener.simple.retry);
+ *   once attempts are exhausted the message is handed to the recoverer, which
+ *   (see {@link DeadLetterRecoverer}) dead-letters it through {@link #recoverExhausted}
  *
- * DLQ routing is explicit: we publish to the DLX ourselves on DEAD_LETTER outcome
- * rather than relying solely on RabbitMQ's built-in DLQ, giving us full control
- * over the dead-letter payload and logging.
+ * DLQ routing is always explicit: every dead-letter path (rule rejection, DEAD_LETTER
+ * outcome, exhausted listener retries) goes through routeToDlq, so the DLQ payload
+ * (status FAILED), the DB state and the metrics stay consistent. The queue's own
+ * x-dead-letter arguments remain only as a safety net for messages the broker rejects.
  */
 @Component
 public class TransactionConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(TransactionConsumer.class);
-
-    private static final String DLQ_EXCHANGE   = "transaction.dlx";
-    private static final String DLQ_ROUTING_KEY = "transaction.dlq";
 
     private final RuleEngine ruleEngine;
     private final ETLTransformer etlTransformer;
@@ -87,7 +88,7 @@ public class TransactionConsumer {
                 if (ruleResult.failed()) {
                     log.warn("Transaction rejected by rules — id={}, reason={}",
                             transaction.getId(), ruleResult.reason());
-                    routeToDlq(transaction, "Rule failure: " + ruleResult.reason());
+                    failAndDeadLetter(transaction, "Rule failure: " + ruleResult.reason());
                     return;
                 }
 
@@ -125,6 +126,28 @@ public class TransactionConsumer {
     }
 
     /**
+     * Called by {@link DeadLetterRecoverer} once listener retries are exhausted.
+     */
+    public void recoverExhausted(Transaction transaction, Throwable cause) {
+        if (failAndDeadLetter(transaction, "Listener retries exhausted: " + cause.getMessage())) {
+            dlqCounter.increment();
+        }
+    }
+
+    /**
+     * Persist FAILED and dead-letter — unless the stored row is already PROCESSED
+     * (a redelivery of a finished transaction must not be failed or dead-lettered).
+     */
+    private boolean failAndDeadLetter(Transaction transaction, String reason) {
+        if (!idempotentProcessor.markFailed(transaction)) {
+            log.info("Skipping DLQ — already PROCESSED, id={}", transaction.getId());
+            return false;
+        }
+        routeToDlq(transaction, reason);
+        return true;
+    }
+
+    /**
      * Explicitly publish to the dead-letter exchange.
      * Using RabbitTemplate directly gives us full control over the payload —
      * we can attach headers, metadata, or a failure reason in future iterations.
@@ -132,6 +155,9 @@ public class TransactionConsumer {
     private void routeToDlq(Transaction transaction, String reason) {
         log.warn("Routing to DLQ — id={}, reason={}", transaction.getId(), reason);
         transaction.setStatus(TransactionStatus.FAILED);
-        rabbitTemplate.convertAndSend(DLQ_EXCHANGE, DLQ_ROUTING_KEY, transaction);
+        rabbitTemplate.convertAndSend(
+                RabbitMQConfig.DEAD_LETTER_EXCHANGE,
+                RabbitMQConfig.DLQ_ROUTING_KEY,
+                transaction);
     }
 }

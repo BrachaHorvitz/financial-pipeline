@@ -5,6 +5,16 @@ spring:
     username: guest
     password: guest
     connection-timeout: 5000
+    listener:
+      simple:
+        # Retry in-process; when attempts run out DeadLetterRecoverer dead-letters the message
+        # explicitly. Rejected messages are never requeued (no infinite loop).
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 500ms
+          multiplier: 2.0
 
   datasource:
     url: jdbc:h2:mem:finpipeline;DB_CLOSE_DELAY=-1

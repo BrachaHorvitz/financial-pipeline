@@ -64,8 +64,14 @@ REST API → DB save → RabbitMQ → Rule Engine → ETL Transformer → Idempo
 - **Optimistic locking** — `@Version` on Transaction entity prevents silent data corruption
   when two consumers attempt to update the same row concurrently.
   The second writer gets `OptimisticLockException` and RabbitMQ retries automatically.
-- **Defense in depth** — Duplicate detection at two layers: controller returns 409 at ingest,
-  `IdempotentProcessor` catches any that reach the queue and marks them `DUPLICATE`.
+- **Defense in depth** — Duplicate handling at two layers: the controller returns 409 at ingest
+  (pre-check, backed by the unique constraint so concurrent inserts also yield 409), and
+  `IdempotentProcessor` ignores redelivered messages whose transaction is already `PROCESSED`
+  or terminally `FAILED` (RabbitMQ delivers at-least-once).
+- **Bounded retries** — listener retry (3 attempts, exponential backoff); when exhausted,
+  `DeadLetterRecoverer` dead-letters the message through the same explicit DLQ path used for rule
+  rejections (row marked `FAILED`, payload and metrics consistent). Already-`PROCESSED` rows are
+  never downgraded or dead-lettered by a redelivery.
 ---
 
 ## Run with Docker
@@ -204,6 +210,9 @@ Content-Type: application/json
 [ { ... }, { ... } ]
 ```
 
+Each item is validated like single ingest and processed independently. Response: one result per
+item (order not guaranteed): `{"deduplicationKey": "...", "status": "ACCEPTED|DUPLICATE|INVALID", "id": "...", "message": "..."}`.
+
 ### Generate mock data
 
 ```bash
@@ -268,7 +277,7 @@ src/main/java/com/finpipeline/
 | `transactionType` | String | `PAYMENT`, `REFUND`, `TRANSFER` |
 | `amount` | BigDecimal | Exact decimal — never `double` for money |
 | `currency` | String | `ILS`, `USD`, `EUR` |
-| `status` | String | `PENDING`, `PROCESSED`, `FAILED`, `DUPLICATE` |
+| `status` | String | `PENDING`, `PROCESSED`, `FAILED` (`DUPLICATE` is legacy and no longer written) |
 | `retryCount` | Integer | Incremented on processing failure |
 | `receivedAt` | LocalDateTime | Auto-set by `@CreationTimestamp` |
 | `processedAt` | LocalDateTime | Set when processing completes |
@@ -366,7 +375,7 @@ Micrometer is vendor-neutral — the same counters feed into Prometheus,
 DataDog, or AWS CloudWatch with zero code changes. Only configuration changes.
 
 ### Observed performance
-Average processing time: ~26ms per transaction end-to-end.
+Processing time is available via `pipeline.processing.duration`.
 
 ---
 
@@ -381,6 +390,10 @@ Average processing time: ~26ms per transaction end-to-end.
 | `AmountValidationRuleTest` | Boundary values, null handling, happy path |
 | `RuleEngineTest` | Fail-fast behavior, mock interactions, rule ordering |
 | `ETLTransformerTest` | Per-source amount conversion, currency normalization |
+| `TransactionControllerTest` | 202/409 on ingest, unique-constraint race, batch parity with single ingest |
+| `IdempotentProcessorTest` | Happy path, redelivery of processed transactions, retry limit, `markFailed` |
+| `TransactionConsumerTest` / `DeadLetterRecovererTest` | Rule rejection and exhausted retries persisted as `FAILED` and sent to the DLX; PROCESSED rows never dead-lettered |
+| `RabbitMQConfigTest` | DLQ binding routing key matches the key used for dead-lettering |
 
 ### Key testing decisions
 - **Mockito** for `RuleEngineTest` — isolates the engine from real rule implementations.
