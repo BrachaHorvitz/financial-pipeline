@@ -48,21 +48,21 @@ public class IdempotentProcessor {
             return ProcessingResult.success(incoming);
         }
 
+        // --- Stage 0: Redelivery check ---
+        // RabbitMQ delivers at-least-once. If this row was already processed, skip it
+        // without touching the stored (already ETL-transformed) values.
+        if (managed.getStatus() == TransactionStatus.PROCESSED) {
+            log.info("DUPLICATE delivery ignored — already processed, id={}, deduplicationKey={}",
+                    managed.getId(), managed.getDeduplicationKey());
+            return ProcessingResult.duplicate(managed);
+        }
+
         // Apply ETL-enriched fields from the incoming (detached) object onto managed
         managed.setAmount(incoming.getAmount());
         managed.setCurrency(incoming.getCurrency());
         managed.setProcessedAt(incoming.getProcessedAt());
 
-        // --- Stage 1: Deduplication check ---
-        if (isDuplicate(managed)) {
-            managed.setStatus(TransactionStatus.DUPLICATE);
-            repository.save(managed);
-            log.info("DUPLICATE detected — deduplicationKey={}, id={}",
-                    managed.getDeduplicationKey(), managed.getId());
-            return ProcessingResult.duplicate(managed);
-        }
-
-        // --- Stage 2: Retry limit check ---
+        // --- Stage 1: Retry limit check ---
         if (hasExceededRetries(managed)) {
             managed.setStatus(TransactionStatus.FAILED);
             repository.save(managed);
@@ -72,12 +72,24 @@ public class IdempotentProcessor {
                     "Exceeded max retries (" + maxRetries + ")");
         }
 
-        // --- Stage 3: Happy path ---
+        // --- Stage 2: Happy path ---
         managed.setStatus(TransactionStatus.PROCESSED);
         repository.save(managed);
         log.info("Transaction PROCESSED — id={}, deduplicationKey={}",
                 managed.getId(), managed.getDeduplicationKey());
         return ProcessingResult.success(managed);
+    }
+
+    /**
+     * Persist FAILED for a transaction rejected before reaching {@link #process}
+     * (e.g. by the rule engine), so the DB matches what is sent to the DLQ.
+     */
+    public void markFailed(Transaction incoming) {
+        repository.findById(incoming.getId()).ifPresentOrElse(managed -> {
+            managed.setStatus(TransactionStatus.FAILED);
+            repository.save(managed);
+        }, () -> log.error("Cannot mark failed — transaction not found in DB, id={}",
+                incoming.getId()));
     }
 
     /**
@@ -92,12 +104,6 @@ public class IdempotentProcessor {
                     managed.getId(), managed.getRetryCount());
         }, () -> log.error("Cannot increment retry — transaction not found in DB, id={}",
                 incoming.getId()));
-    }
-
-    private boolean isDuplicate(Transaction managed) {
-        return repository.findByDeduplicationKey(managed.getDeduplicationKey())
-                .map(existing -> !existing.getId().equals(managed.getId()))
-                .orElse(false);
     }
 
     private boolean hasExceededRetries(Transaction managed) {

@@ -6,6 +6,7 @@ import com.finpipeline.repository.TransactionRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -29,53 +30,54 @@ public class TransactionController {
 
     @PostMapping
     public Mono<ResponseEntity<String>> ingest(@RequestBody @Valid TransactionRequest request) {
-        return Mono.fromCallable(() -> {
-            // check if already exists before trying to save
-            if (repository.findByDeduplicationKey(request.deduplicationKey()).isPresent()) {
-                log.info("Duplicate deduplicationKey detected at ingest — key={}",
-                        request.deduplicationKey());
-                return ResponseEntity
-                        .status(HttpStatus.CONFLICT)
-                        .body("Duplicate transaction — key already exists: "
-                                + request.deduplicationKey());
-            }
-
-            Transaction tx = Transaction.builder()
-                    .deduplicationKey(request.deduplicationKey())
-                    .sourceSystem(Transaction.SourceSystem.valueOf(request.sourceSystem()))
-                    .transactionType(Transaction.TransactionType.valueOf(request.transactionType()))
-                    .amount(request.amount())
-                    .currency(request.currency())
-                    .status(Transaction.TransactionStatus.PENDING)
-                    .rawPayload(request.rawPayload())
-                    .retryCount(0)
-                    .build();
-
-            Transaction saved = repository.save(tx);
-            publisher.publishAsync(saved);
-            return ResponseEntity.accepted()
-                    .body("Transaction queued: " + saved.getId());
-
-        }).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> ingestOne(request))
+                .subscribeOn(Schedulers.boundedElastic());
     }
+
     @PostMapping("/batch")
     public Flux<String> ingestBatch(@RequestBody List<TransactionRequest> requests) {
         return Flux.fromIterable(requests)
-                .flatMap(req -> Mono.fromCallable(() -> {
-                    Transaction tx = Transaction.builder()
-                            .deduplicationKey(req.deduplicationKey())
-                            .sourceSystem(Transaction.SourceSystem.valueOf(req.sourceSystem()))
-                            .transactionType(Transaction.TransactionType.valueOf(req.transactionType()))
-                            .amount(req.amount())
-                            .currency(req.currency())
-                            .status(Transaction.TransactionStatus.PENDING)
-                            .retryCount(0)
-                            .build();
+                .flatMap(req -> Mono.fromCallable(() -> ingestOne(req))
+                        .map(ResponseEntity::getBody)
+                        .subscribeOn(Schedulers.boundedElastic()));
+    }
 
-                    Transaction saved = repository.save(tx);
-                    publisher.publish(saved);
-                    return saved.getId();
-                }).subscribeOn(Schedulers.boundedElastic()));
+    /**
+     * Shared ingest path for single and batch requests: duplicate check, save, async publish.
+     * The pre-check covers the common case; the unique constraint on deduplicationKey is the
+     * real guard, so a concurrent insert of the same key also ends up as 409.
+     */
+    private ResponseEntity<String> ingestOne(TransactionRequest request) {
+        if (repository.findByDeduplicationKey(request.deduplicationKey()).isPresent()) {
+            return duplicateResponse(request.deduplicationKey());
+        }
+
+        Transaction tx = Transaction.builder()
+                .deduplicationKey(request.deduplicationKey())
+                .sourceSystem(Transaction.SourceSystem.valueOf(request.sourceSystem()))
+                .transactionType(Transaction.TransactionType.valueOf(request.transactionType()))
+                .amount(request.amount())
+                .currency(request.currency())
+                .status(Transaction.TransactionStatus.PENDING)
+                .rawPayload(request.rawPayload())
+                .retryCount(0)
+                .build();
+
+        Transaction saved;
+        try {
+            saved = repository.save(tx);
+        } catch (DataIntegrityViolationException e) {
+            return duplicateResponse(request.deduplicationKey());
+        }
+        publisher.publishAsync(saved);
+        return ResponseEntity.accepted().body("Transaction queued: " + saved.getId());
+    }
+
+    private ResponseEntity<String> duplicateResponse(String deduplicationKey) {
+        log.info("Duplicate deduplicationKey detected at ingest — key={}", deduplicationKey);
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body("Duplicate transaction — key already exists: " + deduplicationKey);
     }
 
     @GetMapping("/{id}")
