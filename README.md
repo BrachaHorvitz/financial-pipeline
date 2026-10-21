@@ -277,7 +277,7 @@ src/main/java/com/finpipeline/
 | `transactionType` | String | `PAYMENT`, `REFUND`, `TRANSFER` |
 | `amount` | BigDecimal | Exact decimal — never `double` for money |
 | `currency` | String | `ILS`, `USD`, `EUR` |
-| `status` | String | `PENDING`, `PROCESSED`, `FAILED` |
+| `status` | String | `PENDING`, `PROCESSED`, `FAILED` (`DUPLICATE` is legacy and no longer written) |
 | `retryCount` | Integer | Incremented on processing failure |
 | `receivedAt` | LocalDateTime | Auto-set by `@CreationTimestamp` |
 | `processedAt` | LocalDateTime | Set when processing completes |

@@ -23,7 +23,13 @@ public class Transaction {
     }
 
     public enum TransactionStatus {
-        PENDING, PROCESSED, FAILED
+        PENDING, PROCESSED, FAILED,
+        /**
+         * Legacy: no longer written. Kept so rows saved by earlier versions still load
+         * (status is stored as a string). Remove once old data has been migrated or purged.
+         */
+        @Deprecated
+        DUPLICATE
     }
 
     @Id
