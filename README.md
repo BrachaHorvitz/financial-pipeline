@@ -16,7 +16,7 @@ A compact, highly technical Spring Boot portfolio project demonstrating advanced
 | Serialization | Jackson JSON | Messages stored as readable JSON |
 | Validation | Bean Validation | `@NotBlank`, `@Positive`, `@NotNull` |
 | Build | Maven | `./mvnw spring-boot:run` |
-| Testing | JUnit 5 + StepVerifier | Reactive test support |
+| Testing | JUnit 5 + StepVerifier + Testcontainers | Unit tests, plus end-to-end tests against real PostgreSQL and RabbitMQ |
 | Containerization | Docker + Docker Compose | Multi-stage `Dockerfile`; Compose runs app + PostgreSQL + RabbitMQ |
 | Cloud Deployment | AWS ECS (Fargate) | Task definition for running the containerized app on AWS — see [AWS_deploy.md](AWS_deploy.md) |
 
@@ -385,6 +385,9 @@ Processing time is available via `pipeline.processing.duration`.
 ./mvnw test
 ```
 
+Integration tests start PostgreSQL and RabbitMQ with Testcontainers, so they need a running
+Docker daemon. Without Docker they are skipped and the unit tests still run.
+
 | Test class | What it covers |
 |---|---|
 | `AmountValidationRuleTest` | Boundary values, null handling, happy path |
@@ -394,6 +397,7 @@ Processing time is available via `pipeline.processing.duration`.
 | `IdempotentProcessorTest` | Happy path, redelivery of processed transactions, retry limit, `markFailed` |
 | `TransactionConsumerTest` / `DeadLetterRecovererTest` | Rule rejection and exhausted retries persisted as `FAILED` and sent to the DLX; PROCESSED rows never dead-lettered |
 | `RabbitMQConfigTest` | DLQ binding routing key matches the key used for dead-lettering |
+| `TransactionPipelineIntegrationTest` | End-to-end over HTTP with real PostgreSQL + RabbitMQ: happy path and ETL, 409 on duplicate and on a concurrent unique-key race, rule rejection reaching the DLQ, redelivery idempotency, retry exhaustion, poison messages, batch results |
 
 ### Key testing decisions
 - **Mockito** for `RuleEngineTest` — isolates the engine from real rule implementations.
@@ -403,6 +407,12 @@ Processing time is available via `pipeline.processing.duration`.
 - **`isEqualByComparingTo`** for all `BigDecimal` assertions —
   `equals()` on BigDecimal compares scale too (`100.1 ≠ 100.10`), which breaks
   financial comparisons. `compareTo` checks value only.
+- **Real broker and database for the pipeline** — routing keys, dead-lettering, listener
+  retries and unique-constraint races only behave realistically against the real systems,
+  so they are covered by Testcontainers tests rather than mocks.
+- **One shared Spring context for integration tests** — containers are started once per JVM and
+  all bean overrides live in `AbstractIntegrationTest`. Two cached contexts would both consume
+  `transaction.queue` and steal each other's messages.
 ---
 ## Scope
 
@@ -423,8 +433,8 @@ transaction pipeline:
 - Micrometer metrics exposed via Spring Actuator
 - Docker Compose for local containerized runs (PostgreSQL + RabbitMQ) and
   an ECS Fargate task definition for AWS deployment
-- Unit tests for the rule engine, ETL transformer, and controller layer;
-  CI via GitHub Actions
+- Unit tests for the rule engine, ETL transformer, processor and controller layer,
+  end-to-end integration tests with Testcontainers; CI via GitHub Actions
 
 **Not implemented:** a reconciliation/reporting stage (matching processed
 transactions against an external source and generating CSV/JSON reports)
